@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -32,6 +33,7 @@ namespace Intel.RealSense
         // Intel RealSense Variables
         private Pipeline pipeline;
         private Colorizer colorizer;
+        private Align align;
         private CancellationTokenSource tokenSource = new CancellationTokenSource();
 
 		private CustomProcessingBlock processBlock;
@@ -53,12 +55,15 @@ namespace Intel.RealSense
         private const liblsl.channel_format_t lslChannelFormat = liblsl.channel_format_t.cf_string; // Stream Variable Format
 
         private string[] sample; // Data Samples to be Pushed into LSL
+        private ulong lastDepthFrame = 0;
+        private ulong lastColorFrame = 0;
 
-        private const string defaultDirectory = "Recordings"; // Where the recordings are Stashed.
+        private const string defaultDirectory = "E:\\mfano\\data\\Recordings"; // Where the recordings are Stashed. TOFIX change this before release
         private string fileRecording = "";
 
 
         private VideoFileWriter vidWriter_Depth;
+        private VideoFileWriter vidWriter_ColorDepth;
         private VideoFileWriter vidWriter_Color;
 	
 
@@ -73,7 +78,7 @@ namespace Intel.RealSense
 
                 var bs = BitmapSource.Create(frame.Width, frame.Height,
                                   300, 300,
-                                  PixelFormats.Bgr24,
+                                  PixelFormats.Rgb24,
                                   null,
                                   bytes,
                                   frame.Stride);
@@ -111,59 +116,129 @@ namespace Intel.RealSense
             {
                 pipeline = new Pipeline();
                 colorizer = new Colorizer();
+                align = new Align(Stream.Color);
 
                 var cfg = new Config();
                 cfg.EnableStream(Stream.Depth, 640, 480, Format.Z16,30);
-                cfg.EnableStream(Stream.Color, 640, 480, Format.Bgr8,30);
-				
-                //cfg.EnableRecordToFile(fileRecording); // This is now taken care of by FFMPEG
-                pipeline.Start(cfg);
+                cfg.EnableStream(Stream.Color, 640, 480, Format.Rgb8,30);
+                
+                var pp = pipeline.Start(cfg);
 
-				applyRecordingConfig();
+                //Data recording as rosbag  // Preferred method to not lose frame number information
+                RecordDevice recordDevice = new RecordDevice(pp.Device, fileRecording + ".bag");
+                recordDevice.Pause();
 
-				processBlock = new CustomProcessingBlock((f, src) =>
+                //Load custom parameters to improve depth sensor quality for application
+                var adv = AdvancedDevice.FromDevice(pp.Device);
+                adv.JsonConfiguration = File.ReadAllText("default.json").Replace("\r\n", "\n");
+
+                // Get the recommended processing blocks for the depth sensor
+                var sensorDepth = pp.Device.QuerySensors<Sensor>().First(s => s.Is(Extension.DepthSensor));
+                var blocks = sensorDepth.ProcessingBlocks.ToList();
+
+                // Set Auto Exposure Priority OFF for RGB Camera
+                /*
+                var sensorRGB = pp.Device.QuerySensors<Sensor>().First(s => s.Is(Extension.Video));
+                foreach (var opt in sensorRGB.Options)
+                {
+                    if (opt.Key == Option.AutoExposurePriority)
+                    {
+                        opt.Value = 0f;
+                    }
+                }
+                */
+
+                //For ffmpeg //Removed in favor of .bag file recording provided by realsense (see line 127)
+                //applyRecordingConfig(); 
+
+                processBlock = new CustomProcessingBlock((f, src) =>
+                {
+                    // We create a FrameReleaser object that would track
+                    // all newly allocated .NET frames, and ensure deterministic finalization
+                    // at the end of scope. 
+                    using (var releaser = new FramesReleaser())
+                    {
+                        //Apply recommended processing blocks (includes hole filter which we don't want)
+                        /*
+                        foreach (ProcessingBlock p in blocks)
+                            f = p.Process(f).DisposeWith(releaser);
+                        */
+
+                        //Use the align filter to visually align color and depth frames
+                        //f = f.ApplyFilter(align).DisposeWith(releaser);
+
+                        var frames = f.As<FrameSet>().DisposeWith(releaser);
+
+                        var colorFrame = frames[Stream.Color].DisposeWith(releaser);
+                        var depthFrame = frames[Stream.Depth].DisposeWith(releaser);
+
+                        // Combine the frames into a single result
+                        var res = src.AllocateCompositeFrame(depthFrame, colorFrame).DisposeWith(releaser);
+                        // Send it to the next processing stage
+                        src.FrameReady(res);
+                    }
+                });
+
+                processBlock.Start(f =>
 				{
-					using (var releaser = new FramesReleaser())
-					{
-						var frames = FrameSet.FromFrame(f, releaser);
+                    using (var frames = f.As<FrameSet>())
+                    {
+                        var color_frame = frames.ColorFrame.DisposeWith(frames);
+                        var depth_frame = frames.DepthFrame.DisposeWith(frames);
+                        var colorized_depth = colorizer.Process<VideoFrame>(depth_frame).DisposeWith(frames);
 
-						VideoFrame depth = FramesReleaser.ScopedReturn(releaser, frames.DepthFrame);
-						VideoFrame color = FramesReleaser.ScopedReturn(releaser, frames.ColorFrame);
-
-						var res = src.AllocateCompositeFrame(releaser, depth, color);
-
-						src.FramesReady(res);
-					}
-				});
-
-				processBlock.Start(f =>
-				{
-					using (var releaser = new FramesReleaser())
-					{
-						var frames = FrameSet.FromFrame(f, releaser);
-
-						var depth_frame = FramesReleaser.ScopedReturn(releaser, frames.DepthFrame);
-						var color_frame = FramesReleaser.ScopedReturn(releaser, frames.ColorFrame);
-
-						var colorized_depth = colorizer.Colorize(depth_frame);
-
-						UploadImage(imgDepth, colorized_depth);
+                        UploadImage(imgDepth, colorized_depth);
 						UploadImage(imgColor, color_frame);
+                       
 
-						// Record FFMPEG
-						Bitmap bmpColor = new Bitmap(color_frame.Width, color_frame.Height, color_frame.Stride, System.Drawing.Imaging.PixelFormat.Format24bppRgb, color_frame.Data);
-						vidWriter_Color.WriteVideoFrame(bmpColor);
-
-						Bitmap bmpDepth = new Bitmap(colorized_depth.Width, colorized_depth.Height, colorized_depth.Stride, System.Drawing.Imaging.PixelFormat.Format24bppRgb, colorized_depth.Data);
-						vidWriter_Depth.WriteVideoFrame(bmpDepth);
-
-						if (lslOutlet != null)
+                        if (lslOutlet != null & lslOutlet.have_consumers())
 						{
+
+                            /*
+                            // Record FFMPEG
+                            // if first sample or new frame
+                            if (color_frame.Number == 0 | lastColorFrame != color_frame.Number)
+                            {
+                                Bitmap bmpColor = new Bitmap(color_frame.Width, color_frame.Height, color_frame.Stride, System.Drawing.Imaging.PixelFormat.Format24bppRgb, color_frame.Data).DisposeWith(frames);
+                                vidWriter_Color.WriteVideoFrame(bmpColor);
+                                lastColorFrame = color_frame.Number
+                            }
+                            else
+                            {
+                                Debug.WriteLine("Color frame not updated");
+                            }
+                            
+
+                            // if first sample or new frame
+                            if (depth_frame.Number == 0 | lastDepthFrame!= depth_frame.Number)
+                            {
+                                //TOFIX having issues with recording the 16 bit grayscale depth data
+                                //Bitmap bmpDepth = new Bitmap(depth_frame.Width, depth_frame.Height, depth_frame.Stride, System.Drawing.Imaging.PixelFormat.Format16bppGrayScale, depth_frame.Data).DisposeWith(frames);
+                                //vidWriter_Depth.WriteVideoFrame(bmpDepth);
+
+                                Bitmap bmpColorDepth = new Bitmap(colorized_depth.Width, colorized_depth.Height, colorized_depth.Stride, System.Drawing.Imaging.PixelFormat.Format24bppRgb, colorized_depth.Data).DisposeWith(frames);
+                                vidWriter_ColorDepth.WriteVideoFrame(bmpColorDepth);
+                                lastDepthFrame = depth_frame.Number
+                            }
+                            else
+                            {
+                                Debug.WriteLine("Depth frame not updated");
+                            }
+                            */
+
+                            //rosbag record resume
+                            recordDevice.Resume();
+
 							// Do LSL Streaming Here
-							sample[0] = "" + colorized_depth.Number + "_" + colorized_depth.Timestamp;
+							sample[0] = "" + depth_frame.Number + "_" + depth_frame.Timestamp;
 							sample[1] = "" + color_frame.Number + "_" + color_frame.Timestamp;
 							lslOutlet.push_sample(sample, liblsl.local_clock());
 						}
+                        else
+                        {
+                            //rosbag record pause
+                            recordDevice.Pause();
+                        }
 					}
 				});
 
@@ -177,7 +252,7 @@ namespace Intel.RealSense
                     {
                         using (var frames = pipeline.WaitForFrames())
 						{
-							processBlock.ProcessFrames(frames);
+							processBlock.Process(frames);
 						}
                     }
 
@@ -243,13 +318,32 @@ namespace Intel.RealSense
 
 		private void applyRecordingConfig()
 		{
+            /*
+            //TOFIX some issues with recording 16 bit grayscale...
 			vidWriter_Depth = new VideoFileWriter();
 			vidWriter_Depth.Width = 640;
 			vidWriter_Depth.Height = 480;
-			vidWriter_Depth.VideoCodec = VideoCodec.H264;
-			vidWriter_Depth.VideoOptions["crf"] = "17";
-			vidWriter_Depth.VideoOptions["preset"] = "ultrafast";
-			vidWriter_Depth.Open(fileRecording + "-Depth.avi");
+            if (BitConverter.IsLittleEndian)
+            {
+                Debug.WriteLine("BitConverter is little Endian");
+                vidWriter_Depth.PixelFormat = AVPixelFormat.FormatGrayscale16bppLittleEndian;
+            }
+            else
+            {
+                Debug.WriteLine("BitConverter is big Endian");
+                vidWriter_Depth.PixelFormat = AVPixelFormat.FormatGrayscale16bppBigEndian;
+            }
+            vidWriter_Depth.VideoCodec = VideoCodec.Flv1;
+            vidWriter_Depth.Open(fileRecording + "-Depth.avi");
+            */
+
+            vidWriter_ColorDepth = new VideoFileWriter();
+            vidWriter_ColorDepth.Width = 640;
+            vidWriter_ColorDepth.Height = 480;
+            vidWriter_ColorDepth.VideoCodec = VideoCodec.H264;
+            vidWriter_ColorDepth.VideoOptions["crf"] = "17";
+            vidWriter_ColorDepth.VideoOptions["preset"] = "ultrafast";
+            vidWriter_ColorDepth.Open(fileRecording + "-ColorDepth.avi");
 
 			vidWriter_Color = new VideoFileWriter();
 			vidWriter_Color.Width = 640;
