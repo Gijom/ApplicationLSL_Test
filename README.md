@@ -2,6 +2,9 @@
 
 This is an application suite that I am currently working on for multimodal data collection experiments. Applications developed in this suite all work on top of the LabStreaming Layer middleware allowing to fully synchronize different devices. This code is currently a work in progress and will be slowly updated as time goes on.
 
+# Hardware setup
+Instructions and notes for the physical setup can be found [here](capture_setup.md)
+
 # Making it Run
 
 All these applications are running in x64, so when compiling make sure that you are compiling in x64 (not CPU or x86). All code was developed in Visual Studio 2017, so it should work out of the box in that system. I haven't tested on other compilers. 
