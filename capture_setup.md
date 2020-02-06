@@ -134,7 +134,7 @@ sudo apt install librealsense2-dkms librealsense2-utils
 
 ### Notes
 Only a part of the pressure mat is covered by the sensors: 
-a 40x40cm area starting from the corner opposite (diagonal) from where the electronic unit connects to the mat. 
+a \~32x32cm area starting from the corner opposite (diagonal) from where the electronic unit connects to the mat. 
 Make sure to place the mat such that the part that is equipped with the sensors is properly aligned to the seat. 
 Please refer to the [technical documentation](http://sensingtex.com/wp-content/uploads/2018/02/114_WHITE_PAPER_Seating_Mat_English_rev_09.pdf) on the *sensing tex* website for more details.
 
