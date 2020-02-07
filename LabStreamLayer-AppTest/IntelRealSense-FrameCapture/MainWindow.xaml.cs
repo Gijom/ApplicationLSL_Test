@@ -1,6 +1,8 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Drawing;
+using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -17,8 +19,6 @@ using System.Windows.Navigation;
 using System.Windows.Shapes;
 using Intel.RealSense;
 using LSL;
-using Accord.Video.FFMPEG;
-using System.Drawing;
 using System.Runtime.InteropServices;
 
 namespace Intel.RealSense
@@ -58,13 +58,14 @@ namespace Intel.RealSense
         private ulong lastDepthFrame = 0;
         private ulong lastColorFrame = 0;
 
-        private const string defaultDirectory = "E:\\mfano\\data\\Recordings"; // Where the recordings are Stashed. TOFIX change this before release
+        private const string defaultDirectory = ".\\Recordings"; // Where the recordings are Stashed. TOFIX change this before release
         private string fileRecording = "";
 
 
-        private VideoFileWriter vidWriter_Depth;
-        private VideoFileWriter vidWriter_ColorDepth;
-        private VideoFileWriter vidWriter_Color;
+        private ImageCodecInfo pngCodecInf;
+        private System.Drawing.Imaging.Encoder myEncoder;
+        private EncoderParameter myEncoderParameter;
+        private EncoderParameters myEncoderParameters;
 	
 
         private void UploadImage(System.Windows.Controls.Image img, VideoFrame frame)
@@ -104,7 +105,7 @@ namespace Intel.RealSense
 
         /**
          * NOTES 
-         * Curently it records immediately after linking the program with LabStreamLayer. 
+         * Curently it records immediately after linking the program with LabStreamLayer and there is a consumer of the data. 
          * There might be a better solution, but we don't want to increase the number of button presses for the protoccol. It is probably better to record more than to forget pressing 
          * the record button before an experiment. 
          * 
@@ -148,8 +149,13 @@ namespace Intel.RealSense
                 }
                 */
 
-                //For ffmpeg //Removed in favor of .bag file recording provided by realsense (see line 127)
-                //applyRecordingConfig(); 
+
+                pngCodecInf = GetEncoderInfo("image/png");
+                myEncoder = System.Drawing.Imaging.Encoder.Quality;
+                myEncoderParameters = new EncoderParameters(1);
+                // quality level of encoder
+                myEncoderParameter = new EncoderParameter(myEncoder, 100L);
+                myEncoderParameters.Param[0] = myEncoderParameter;
 
                 processBlock = new CustomProcessingBlock((f, src) =>
                 {
@@ -194,14 +200,15 @@ namespace Intel.RealSense
                         if (lslOutlet != null & lslOutlet.have_consumers())
 						{
 
-                            /*
-                            // Record FFMPEG
+                            
                             // if first sample or new frame
                             if (color_frame.Number == 0 | lastColorFrame != color_frame.Number)
                             {
                                 Bitmap bmpColor = new Bitmap(color_frame.Width, color_frame.Height, color_frame.Stride, System.Drawing.Imaging.PixelFormat.Format24bppRgb, color_frame.Data).DisposeWith(frames);
-                                vidWriter_Color.WriteVideoFrame(bmpColor);
-                                lastColorFrame = color_frame.Number
+
+                                //bmpColor.Save(fileRecording + String.Format("color_{0}.png", color_frame.Number.ToString()), pngCodecInf,myEncoderParameters);
+                                
+                                lastColorFrame = color_frame.Number;
                             }
                             else
                             {
@@ -214,17 +221,20 @@ namespace Intel.RealSense
                             {
                                 //TOFIX having issues with recording the 16 bit grayscale depth data
                                 //Bitmap bmpDepth = new Bitmap(depth_frame.Width, depth_frame.Height, depth_frame.Stride, System.Drawing.Imaging.PixelFormat.Format16bppGrayScale, depth_frame.Data).DisposeWith(frames);
-                                //vidWriter_Depth.WriteVideoFrame(bmpDepth);
+                                //bmpDepth.Save(fileRecording + String.Format("depth_{0}.png", depth_frame.Number.ToString()), pngCodecInf, myEncoderParameters);
 
                                 Bitmap bmpColorDepth = new Bitmap(colorized_depth.Width, colorized_depth.Height, colorized_depth.Stride, System.Drawing.Imaging.PixelFormat.Format24bppRgb, colorized_depth.Data).DisposeWith(frames);
-                                vidWriter_ColorDepth.WriteVideoFrame(bmpColorDepth);
-                                lastDepthFrame = depth_frame.Number
+
+                                //bmpColorDepth.Save(fileRecording + String.Format("depthClr_{0}.png", colorized_depth.Number.ToString()), pngCodecInf, myEncoderParameters);
+
+                                lastDepthFrame = depth_frame.Number;
+                                
                             }
                             else
                             {
                                 Debug.WriteLine("Depth frame not updated");
                             }
-                            */
+                            
 
                             //rosbag record resume
                             recordDevice.Resume();
@@ -286,7 +296,6 @@ namespace Intel.RealSense
 
             checkDirectory();
 
-			//applyRecordingConfig();
 
             startRecordingProcess();
         }
@@ -316,43 +325,19 @@ namespace Intel.RealSense
 
         }
 
-		private void applyRecordingConfig()
-		{
-            /*
-            //TOFIX some issues with recording 16 bit grayscale...
-			vidWriter_Depth = new VideoFileWriter();
-			vidWriter_Depth.Width = 640;
-			vidWriter_Depth.Height = 480;
-            if (BitConverter.IsLittleEndian)
+        private static ImageCodecInfo GetEncoderInfo(String mimeType)
+        {
+            int j;
+            ImageCodecInfo[] encoders;
+            encoders = ImageCodecInfo.GetImageEncoders();
+            for (j = 0; j < encoders.Length; ++j)
             {
-                Debug.WriteLine("BitConverter is little Endian");
-                vidWriter_Depth.PixelFormat = AVPixelFormat.FormatGrayscale16bppLittleEndian;
+                if (encoders[j].MimeType == mimeType)
+                    return encoders[j];
             }
-            else
-            {
-                Debug.WriteLine("BitConverter is big Endian");
-                vidWriter_Depth.PixelFormat = AVPixelFormat.FormatGrayscale16bppBigEndian;
-            }
-            vidWriter_Depth.VideoCodec = VideoCodec.Flv1;
-            vidWriter_Depth.Open(fileRecording + "-Depth.avi");
-            */
+            return null;
+        }
 
-            vidWriter_ColorDepth = new VideoFileWriter();
-            vidWriter_ColorDepth.Width = 640;
-            vidWriter_ColorDepth.Height = 480;
-            vidWriter_ColorDepth.VideoCodec = VideoCodec.H264;
-            vidWriter_ColorDepth.VideoOptions["crf"] = "17";
-            vidWriter_ColorDepth.VideoOptions["preset"] = "ultrafast";
-            vidWriter_ColorDepth.Open(fileRecording + "-ColorDepth.avi");
-
-			vidWriter_Color = new VideoFileWriter();
-			vidWriter_Color.Width = 640;
-			vidWriter_Color.Height = 480;
-			vidWriter_Color.VideoCodec = VideoCodec.H264;
-			vidWriter_Color.VideoOptions["crf"] = "17";
-			vidWriter_Color.VideoOptions["preset"] = "ultrafast";
-			vidWriter_Color.Open(fileRecording + "-Color.avi");
-		}
 
         // Interface Controls Go Here
         private void control_Closing(object sender, System.ComponentModel.CancelEventArgs e)
